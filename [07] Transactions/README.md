@@ -2,566 +2,161 @@
 
 ### 7장. Transactions
 
-현실의 data system에서는 많은 일이 잘못될 수 있음
-
-database software나 hardware가 write 중간에 실패할 수 있음
-
-application이 여러 operation 중간에 crash할 수 있음
-
-network interruption으로 application과 database가 끊길 수 있음
-
-여러 client가 동시에 같은 data를 write하며 서로의 변경을 덮어쓸 수 있음
-
-client가 부분적으로만 update된 data를 읽을 수도 있음
-
-transaction은 이런 문제를 application이 덜 직접 다루게 해주는 abstraction임
-
-여러 read와 write를 하나의 logical unit으로 묶고, 전체가 성공하면 commit, 실패하면 abort 또는 rollback함
-
-transaction이 abort되면 application은 보통 retry하면 됨
-
-핵심은 partial failure와 concurrency issue를 database가 일정 수준까지 감춰준다는 점임
-
-하지만 transaction은 공짜가 아님
-
-성능, availability, 구현 복잡도와 trade-off가 있음
-
-따라서 transaction이 제공하는 safety guarantee와 isolation level의 실제 의미를 알아야 함
-
-책의 특정 database version, isolation level 이름, product 동작 예시는 원문 당시 기준이므로 실제 운영 판단에는 현재 공식 문서를 확인해야 함
+- 원문: 초판, 본문 pp. 221–267 / PDF pp. 243–289. 참고문헌은 PDF p. 290부터 시작함
+- 핵심: 부분 실패와 동시 변경을 다루되, 실제 isolation 보장이 무엇인지 확인함
+- 정비 관점: 부품 장탈착 기록과 현재 장착 목록을 한 업무로 묶어, 둘 중 일부만 반영되는 상태를 막는 문제와 유사함
 
 <br>
 
-### The Slippery Concept of a Transaction
+#### The Slippery Concept of a Transaction — 업무를 하나의 단위로 묶기
 
-relational database는 오랫동안 transaction을 제공해 왔음
+- transaction은 여러 읽기·쓰기를 논리적 단위로 묶음. 성공 시 commit, 실패 시 abort함
+- 일부 복잡한 실패를 “전체 취소 후 재시도”로 단순화함
+- transaction이라는 이름이나 ACID 표기만으로 구체적인 보장을 판단할 수는 없음
 
-반면 NoSQL 흐름에서는 replication과 partitioning을 기본으로 제공하면서 transaction을 약화하거나 포기한 system도 많았음
+##### The Meaning of ACID — 네 속성의 범위
 
-하지만 transaction을 항상 써야 한다거나, scalability를 위해 반드시 버려야 한다는 식의 단정은 둘 다 과함
+| 속성 | 의미 | 주의점 |
+| --- | --- | --- |
+| atomicity | 일부만 남기지 않고 전체 성공·취소 | 동시 실행의 순서 보장과 다름 |
+| consistency | 업무의 invariant 유지 | 올바른 업무 규칙과 transaction 설계 필요 |
+| isolation | 동시 transaction의 간섭 제어 | 격리 수준에 따라 허용하는 현상이 다름 |
+| durability | commit된 변경 보존 | 저장·복제·복구의 장애 가정에 의존 |
 
-중요한 것은 transaction이 어떤 guarantee를 제공하고, 그 비용이 무엇인지 이해하는 것임
+- ACID의 consistency는 replica가 같은 값을 보는 consistency와 다른 뜻임
+- database의 제약 조건이 일부 invariant를 검사할 수 있지만 모든 업무 규칙을 대신하지는 못함
+- disk 기록, 복제, backup은 서로 다른 장애를 다룸. 하나의 수단만으로 모든 손실을 막지는 못함
+- isolation이 부족하면 두 사용자가 같은 값을 읽어 수정하는 동안 한쪽 변경이 사라질 수 있음
 
-transaction의 safety guarantee는 보통 ACID로 설명됨
+<img src="./img/figure7-1.png" width="80%" height="80%" alt="그림 7-1. 두 client의 counter 증가 중 한쪽 변경이 사라지는 race condition"/>
 
-- Atomicity
-- Consistency
-- Isolation
-- Durability
+##### Single-Object and Multi-Object Operations — 한 record와 여러 record
 
-다만 ACID라는 말은 system마다 실제 의미가 다를 수 있음
+- 단일 record의 atomic write는 데이터가 반쯤 기록되는 일을 막음
+- 여러 record·secondary index·중복 데이터의 정합성을 함께 맞추려면 더 넓은 transaction 범위가 필요할 수 있음
+- isolation이 부족하면 다른 transaction이 여러 object의 변경 중 일부만 읽을 수 있음
 
-특히 isolation은 database마다 이름과 구현이 크게 다를 수 있으므로 marketing 용어로만 믿으면 안 됨
+<img src="./img/figure7-2.png" width="80%" height="80%" alt="그림 7-2. 완료되지 않은 여러 object의 변경 중 일부를 읽는 dirty read"/>
 
-<br>
+- atomicity는 실패 후 일부 변경만 남는 문제를 다룸. 뒤의 변경이 실패하면 앞서 수행한 변경도 취소해야 함
 
-### Atomicity
+<img src="./img/figure7-3.png" width="80%" height="80%" alt="그림 7-3. 실패 시 이미 수행한 변경을 취소하는 atomicity"/>
 
-ACID에서 atomicity는 concurrency 문제가 아니라 failure handling에 관한 것임
-
-여러 write 중 일부가 처리된 뒤 fault가 발생하면 transaction 전체를 abort하고 이미 수행한 write를 undo해야 함
-
-이 guarantee가 없으면 application은 어떤 write가 반영되었고 어떤 write가 실패했는지 직접 추적해야 함
-
-retry도 위험해짐
-
-이미 일부 write가 반영된 상태에서 같은 작업을 다시 수행하면 duplicate나 잘못된 data가 생길 수 있기 때문임
-
-따라서 ACID atomicity의 핵심은 all-or-nothing guarantee와 abortability임
-
-<br>
-
-### Consistency
-
-consistency라는 단어는 여러 의미로 쓰임
-
-- 5장의 replica consistency와 eventual consistency
-- 6장의 consistent hashing
-- CAP theorem에서의 linearizability
-- ACID에서 application invariant가 유지되는 상태
-
-ACID의 consistency는 database가 혼자 보장하는 성질이 아님
-
-예를 들어 accounting system에서 debit과 credit의 합이 맞아야 한다는 invariant는 application이 정의함
-
-database는 foreign key나 uniqueness constraint 같은 일부 invariant는 확인할 수 있음
-
-하지만 일반적으로 어떤 data가 valid한지는 application logic이 결정함
-
-따라서 atomicity, isolation, durability는 database의 속성에 가깝지만, ACID consistency는 application이 transaction을 올바르게 설계해야 얻을 수 있음
+- commit 응답만 유실되면 실제 완료 여부가 불확실함. 무조건 retry하면 중복 효과가 생길 수 있음
+- 과부하 시 retry는 backoff 등이 필요함. 영구 오류는 재시도만으로 해결되지 않음
+- database 밖으로 보낸 메일·외부 요청은 transaction abort로 자동 취소되지 않음
 
 <br>
 
-### Isolation
+#### Weak Isolation Levels — 무엇이 여전히 잘못될 수 있는지 확인
 
-여러 client가 동시에 같은 record를 읽고 쓰면 race condition이 생길 수 있음
+- 약한 isolation은 일부 동시성 문제만 막음
+- 같은 이름의 isolation이라도 제품·버전·query 종류에 따라 동작이 다를 수 있음
 
-예를 들어 두 client가 counter 값을 읽고 각각 1을 더한 뒤 write하면, 실제로는 두 번 증가해야 하지만 한 번만 증가할 수 있음
+##### Read Committed — 미완료 변경을 읽거나 덮어쓰지 않기
 
-<img src="./img/figure7-1.png" width="80%" height="80%">
-<br>
+- 책에서 설명하는 read committed는 dirty read와 dirty write를 막음
+- dirty read는 다른 transaction의 미완료 값을 읽는 것임. 나중에 rollback되면 존재하지 않는 기록을 근거로 판단한 셈이 됨
 
-isolation은 concurrent transaction이 서로 간섭하지 않게 하는 guarantee임
+<img src="./img/figure7-4.png" width="80%" height="80%" alt="그림 7-4. 다른 transaction의 commit 이후에만 새 값을 보여주는 read committed"/>
 
-가장 강한 형태는 serializability임
+- dirty write는 다른 transaction이 아직 완료하지 않은 값을 덮어쓰는 것임
+- 일반적인 구현은 쓰기 lock과 이전 committed version을 조합함
 
-transaction들이 실제로는 동시에 실행되더라도 결과는 하나씩 순서대로 실행한 것과 같아야 함
+<img src="./img/figure7-5.png" width="80%" height="80%" alt="그림 7-5. 두 transaction의 미완료 쓰기가 섞이는 dirty write"/>
 
-하지만 serializable isolation은 비용이 있어서 많은 database가 더 약한 isolation level을 기본으로 사용함
+- 각 query가 다른 시점을 볼 수 있고, read-modify-write의 lost update도 남을 수 있음
 
-이 장의 많은 내용은 약한 isolation에서 어떤 race condition이 남는지 설명함
+##### Snapshot Isolation and Repeatable Read — 같은 시점의 자료 읽기
 
-<br>
+- read skew는 한 transaction이 서로 다른 시점의 데이터를 조합해 읽는 현상임
+- 예를 들어 두 계좌 사이 이체 중 양쪽 잔액을 서로 다른 시점에 읽으면 합계가 맞지 않을 수 있음
 
-### Durability
+<img src="./img/figure7-6.png" width="80%" height="80%" alt="그림 7-6. 서로 다른 시점의 계좌 잔액을 읽어 총액이 어긋나는 read skew"/>
 
-durability는 transaction이 commit된 뒤에는 hardware fault나 database crash가 있어도 write를 잃지 않는다는 약속임
+- snapshot isolation은 일정한 snapshot을 기준으로 읽게 함. backup·분석·무결성 검사에 유용함
+- MVCC는 여러 version을 보관하고 각 transaction에 보이는 version을 선택하는 구현 방식임
+- 이전 version을 유지하므로 reader와 writer의 충돌을 줄일 수 있음. 오래된 snapshot은 version 정리를 늦출 수 있음
 
-single-node database에서는 보통 disk나 SSD 같은 nonvolatile storage와 write-ahead log가 필요함
+<img src="./img/figure7-7.png" width="80%" height="80%" alt="그림 7-7. 생성·삭제 transaction 정보를 이용해 snapshot별 row version을 선택하는 MVCC"/>
 
-replicated database에서는 여러 node에 복제되었는지가 durability 기준이 될 수 있음
+- repeatable read라는 이름만으로 snapshot isolation·serializability를 동일시하면 안 됨
+- 확인한 [PostgreSQL 공식 문서](https://www.postgresql.org/docs/current/transaction-iso.html)는 repeatable read에서도 serialization anomaly가 가능하고, serializable을 별도로 제공한다고 설명함. 오류가 나면 transaction 전체를 다시 실행해야 함
 
-하지만 perfect durability는 없음
+##### Preventing Lost Updates — 같은 값을 읽고 덮어쓰는 문제
 
-disk, SSD, filesystem, firmware, replication, backup 모두 failure mode가 있음
+- lost update는 같은 과거 값을 읽은 뒤 각각 수정하면서 한쪽 변경이 사라지는 현상임
+- 대응: atomic update, 관련 row의 명시적 lock, 충돌 감지 후 abort, version을 조건으로 한 compare-and-set 등
+- compare-and-set은 조건 검사와 변경이 원자적이어야 함. stale snapshot의 비교만으로는 충분하지 않을 수 있음
+- multi-leader·leaderless에서는 여러 변경을 보존해 병합하는 접근도 필요함. last write wins는 유실을 막는 방법이 아님
 
-asynchronous replication에서는 leader failover 중 최근 write가 사라질 수 있음
+##### Write Skew and Phantoms — 다른 row를 바꿔도 규칙이 깨짐
 
-따라서 durability는 절대 보장이 아니라 risk를 줄이는 여러 기법의 조합으로 봐야 함
+- write skew는 같은 조건을 읽은 두 transaction이 서로 다른 row를 바꿔 invariant를 깨뜨리는 현상임
+- 책에서는 두 당직 의사가 각각 다른 의사가 남아 있다고 보고 모두 당직에서 빠짐
+- 정비 비유로는 “최소 한 명은 배정돼야 함”을 각자 확인하고 서로 다른 배정 기록을 해제하는 상황임
 
-disk write, replication, backup은 서로 대체재라기보다 함께 써야 하는 보완 수단임
+<img src="./img/figure7-8.png" width="80%" height="80%" alt="그림 7-8. 서로 다른 의사의 당직 row를 변경해 최소 인원 규칙이 깨지는 write skew"/>
 
-<br>
-
-### Single-Object and Multi-Object Operations
-
-atomicity와 isolation은 보통 여러 object를 함께 변경할 때 특히 중요함
-
-예를 들어 email을 추가하면서 unread counter도 함께 증가시켜야 할 수 있음
-
-중간 상태가 보이면 mailbox에는 unread email이 있는데 counter는 0인 이상한 상태가 될 수 있음
-
-<img src="./img/figure7-2.png" width="80%" height="80%">
-<br>
-
-또한 email insert는 성공했지만 counter update가 실패하면 data가 서로 맞지 않게 됨
-
-atomic transaction은 이 경우 전체를 abort해 이전 write를 rollback함
-
-<img src="./img/figure7-3.png" width="80%" height="80%">
-<br>
-
-single object write에도 atomicity와 isolation은 필요함
-
-예를 들어 JSON document를 쓰는 중 network가 끊기거나 power가 나가도 database가 깨진 half-written value를 저장하면 안 됨
-
-많은 storage engine은 single object 수준의 atomicity와 isolation은 제공함
-
-하지만 이것만으로 multi-object transaction과 같은 의미의 transaction이 되는 것은 아님
-
-foreign key, denormalized data, secondary index처럼 여러 object를 함께 맞춰야 하는 경우에는 multi-object transaction이 유용함
-
-transaction이 없으면 partial failure와 concurrent write를 application이 직접 복구해야 함
+- snapshot isolation의 동일 row 충돌 감지만으로는 일반적인 write skew를 막지 못함
+- phantom은 다른 쓰기가 검색 조건의 결과 집합을 바꾸는 문제임. 없는 예약을 확인한 뒤 동시에 예약을 넣는 경우가 예임
+- 실제 row만 lock하면 아직 없는 row의 삽입을 막지 못할 수 있음
+- serializable isolation, 조건 범위의 lock, 공통으로 lock할 record를 만드는 방식 등을 검토함
 
 <br>
 
-### Handling Errors and Aborts
+#### Serializability — 하나씩 실행한 것과 같은 결과
 
-transaction의 중요한 특징은 abort 후 retry가 가능하다는 점임
+- 동시 실행의 결과가 어떤 순차 실행 순서와 같아야 한다는 보장임
+- 실제 시간을 따라 최신 값을 읽는 linearizability와는 별개임. 관련 차이는 9장에서 다룸
+- 순차 실행 자체의 업무 코드가 틀렸다면 serializability만으로 올바르게 되지는 않음
 
-database가 atomicity, isolation, durability를 지킬 수 없다고 판단하면 half-finished 상태를 허용하지 않고 transaction을 abort함
+##### Actual Serial Execution — 실제로 하나씩 실행
 
-하지만 retry도 항상 안전하지는 않음
+- 짧고 빠른 transaction을 한 thread에서 처리하면 동시 실행의 충돌을 피할 수 있음
+- 사용자 입력이나 왕복 통신을 기다리며 전체 실행을 막지 않도록 transaction logic을 묶어서 실행하는 방식이 사용됨
 
-- commit은 성공했지만 acknowledgement가 network에서 사라졌다면 retry가 duplicate effect를 만들 수 있음
-- overload 상황에서 retry는 부하를 더 키울 수 있음
-- permanent error는 retry해도 의미가 없음
-- database 밖의 side effect는 transaction abort와 함께 자동으로 rollback되지 않음
-- client process 자체가 실패하면 retry하려던 data가 사라질 수 있음
+<img src="./img/figure7-9.png" width="80%" height="80%" alt="그림 7-9. 여러 번 왕복하는 interactive transaction과 한 번에 실행하는 stored procedure 비교"/>
 
-따라서 transaction abort는 retry를 쉽게 만들지만, application-level deduplication, backoff, side effect 처리도 함께 고려해야 함
+- active data가 memory에 있고 transaction이 짧으면 적합할 수 있음
+- 여러 partition에서 독립 실행하면 처리량을 늘릴 수 있지만, cross-partition transaction은 조정 비용이 생김
 
-<br>
+##### Two-Phase Locking (2PL) — 충돌하는 접근을 기다리게 하기
 
-### Weak Isolation Levels
+- 읽기는 shared lock, 쓰기는 exclusive lock을 사용함. 충돌하는 접근은 대기함
+- 기본 2PL은 lock을 획득하는 단계와 해제하는 단계를 나눔. 책의 설명은 lock을 transaction 끝까지 유지하는 strict한 방식에 초점을 둠
+- deadlock이 나면 일부 transaction을 abort하고 retry해야 함. 느린 transaction이 다른 작업의 지연을 키울 수 있음
+- **2PL은 격리 기법이며, 9장의 2PC는 여러 참여자의 commit 결정 절차임**
+- phantom까지 막으려면 row뿐 아니라 predicate 또는 index range를 보호해야 함. 범위를 넓게 잡으면 불필요한 대기가 늘 수 있음
 
-두 transaction이 서로 다른 data만 다룬다면 parallel하게 실행해도 문제가 적음
+##### Serializable Snapshot Isolation (SSI) — 실행 후 위험한 의존성 감지
 
-문제는 한 transaction이 다른 transaction이 동시에 변경하는 data를 읽거나, 둘이 같은 data를 동시에 write할 때 생김
+- snapshot을 읽으며 진행하고, 읽기·쓰기 의존성에서 순차 실행을 깨뜨릴 위험을 감지해 일부 transaction을 abort함
+- 오래된 값을 읽은 모든 transaction을 무조건 취소하는 방식은 아님. 어떤 의존 관계가 형성됐는지가 중요함
 
-concurrency bug는 timing이 맞아야 드러나므로 test로 찾기 어렵고 재현도 어려움
+###### Detecting Stale MVCC Reads — snapshot에 보이지 않은 변경
 
-database는 isolation으로 이런 문제를 숨기려 하지만, 실제 system은 성능 때문에 weaker isolation level을 많이 사용함
+- 읽을 때 snapshot에서 제외한 동시 쓰기가 이후 commit될 수 있음. 이런 읽기·쓰기 관계를 추적해 순차 실행을 깨뜨릴 위험을 판단함
 
-약한 isolation level은 일부 anomaly만 막고 나머지는 application이 감수해야 함
+<img src="./img/figure7-10.png" width="80%" height="80%" alt="그림 7-10. snapshot에서 보이지 않은 동시 변경과 읽기의 의존성 감지"/>
 
-따라서 database가 ACID라고 말해도 어떤 isolation level에서 어떤 anomaly를 막는지 확인해야 함
+###### Detecting Writes That Affect Prior Reads — 읽었던 범위의 변경
 
-<br>
+- 다른 transaction이 앞선 query의 검색 범위를 바꾸는 경우도 추적해야 함. SSI의 읽기 추적은 2PL처럼 그 쓰기를 미리 막기 위한 lock과는 다름
 
-### Read Committed
+<img src="./img/figure7-11.png" width="80%" height="80%" alt="그림 7-11. 이전 query가 읽은 범위를 다른 transaction이 변경할 때 의존성 기록"/>
 
-read committed는 가장 기본적인 transaction isolation level 중 하나임
+###### Performance of Serializable Snapshot Isolation — 대기와 재시도 비용
 
-두 가지를 보장함
-
-- committed data만 읽음
-- committed data만 overwrite함
-
-첫 번째는 dirty read를 막는다는 뜻임
-
-transaction이 아직 commit하지 않은 write는 다른 transaction에게 보이면 안 됨
-
-<img src="./img/figure7-4.png" width="80%" height="80%">
-<br>
-
-dirty read를 허용하면 다른 transaction이 나중에 rollback될 data를 보고 decision을 내릴 수 있음
-
-또한 여러 object를 update하는 transaction의 중간 상태를 다른 client가 볼 수 있음
+- 2PL처럼 모든 충돌 가능성을 미리 막는 대신 retry 비용을 감수하는 optimistic 접근임
+- reader·writer 간 대기를 줄이지만, 쓰기 충돌과 기타 lock이 모두 사라지는 것은 아님
+- 경합이 높거나 transaction이 길면 abort·retry 비용이 커질 수 있음
 
 <br>
 
-두 번째는 dirty write를 막는다는 뜻임
-
-한 transaction이 아직 commit하지 않은 value를 다른 transaction이 덮어쓰면 안 됨
-
-<img src="./img/figure7-5.png" width="80%" height="80%">
-<br>
-
-read committed는 보통 row-level lock으로 dirty write를 막음
-
-dirty read는 old committed value와 new uncommitted value를 함께 보관해 막는 경우가 많음
-
-write transaction이 진행 중일 때 다른 reader에게는 old committed value를 보여주고, commit 후에만 new value를 보여줌
-
-하지만 read committed는 모든 race condition을 막지 않음
-
-counter lost update 같은 문제는 여전히 생길 수 있음
-
-<br>
-
-### Snapshot Isolation and Repeatable Read
-
-read committed에서는 한 transaction 안의 여러 read가 서로 다른 시점의 database를 볼 수 있음
-
-이 때문에 read skew 또는 nonrepeatable read가 생길 수 있음
-
-예를 들어 Alice가 두 account balance를 읽는 동안 다른 transaction이 한 account에서 다른 account로 돈을 옮기면, Alice는 총액이 사라진 것처럼 볼 수 있음
-
-<img src="./img/figure7-6.png" width="80%" height="80%">
-<br>
-
-일시적인 UI 문제로 끝날 수도 있지만 backup, analytics query, integrity check에서는 큰 문제가 됨
-
-backup이 몇 시간 동안 실행되는 동안 database가 계속 변하면 backup 내부의 일부 data는 과거, 일부 data는 현재를 반영할 수 있음
-
-snapshot isolation은 transaction이 시작된 시점의 consistent snapshot을 보게 함
-
-transaction 중간에 다른 write가 commit되어도 해당 transaction의 read는 같은 snapshot을 유지함
-
-이 방식은 long-running read-only query에 특히 유용함
-
-<br>
-
-### Implementing Snapshot Isolation
-
-snapshot isolation은 보통 multi-version concurrency control, 즉 MVCC로 구현됨
-
-database는 object의 여러 committed version을 동시에 유지함
-
-reader는 lock을 잡지 않고 자신이 볼 수 있는 version을 읽음
-
-writer도 reader를 block하지 않음
-
-핵심 원칙은 readers never block writers, writers never block readers임
-
-<img src="./img/figure7-7.png" width="80%" height="80%">
-<br>
-
-각 row에는 보통 생성한 transaction ID와 삭제한 transaction ID 같은 metadata가 붙음
-
-update는 내부적으로 old row를 delete 표시하고 new row를 create하는 방식으로 표현될 수 있음
-
-transaction은 자신이 시작된 시점에 이미 commit된 version만 볼 수 있음
-
-aborted transaction의 write, 나중에 시작한 transaction의 write, 시작 시점에 아직 commit되지 않은 write는 보이지 않음
-
-오래 실행되는 transaction은 오래된 snapshot을 계속 읽을 수 있음
-
-이를 위해 database는 old version을 당장 지우지 않고, 더 이상 필요한 transaction이 없을 때 garbage collection함
-
-<br>
-
-### Repeatable Read Naming Confusion
-
-snapshot isolation은 database마다 다른 이름으로 제공됨
-
-PostgreSQL과 MySQL은 repeatable read라고 부르고, Oracle은 serializable이라는 이름으로 더 약한 snapshot isolation을 제공함
-
-SQL standard의 isolation level 정의는 모호하고 구현 독립적이지 않음
-
-따라서 repeatable read라는 이름만 보고 같은 guarantee를 기대하면 안 됨
-
-실제 isolation behavior는 각 database 문서와 실험으로 확인해야 함
-
-<br>
-
-### Preventing Lost Updates
-
-lost update는 두 transaction이 같은 값을 읽고 각각 수정한 뒤 write하면서 한쪽 변경이 사라지는 문제임
-
-read-modify-write cycle에서 자주 발생함
-
-대표적인 예는 counter increment, account balance update, JSON document 수정, wiki page 동시 편집임
-
-이를 막는 방법은 여러 가지임
-
-첫째, atomic write operation을 사용함
-
-counter increment처럼 database가 제공하는 atomic update로 표현할 수 있으면 application에서 read-modify-write를 직접 구현하지 않는 것이 좋음
-
-둘째, explicit lock을 사용함
-
-`SELECT FOR UPDATE`처럼 수정할 row를 먼저 lock하고 application logic을 수행하면 같은 object에 대한 concurrent update를 막을 수 있음
-
-셋째, database가 lost update를 자동 감지하고 transaction을 abort하게 할 수 있음
-
-일부 snapshot isolation 구현은 lost update를 감지하지만, 모든 database가 그런 것은 아님
-
-넷째, compare-and-set을 사용할 수 있음
-
-마지막으로 읽은 값이 그대로일 때만 update를 수행하고, 값이 바뀌었다면 retry하는 방식임
-
-하지만 compare-and-set도 database가 stale snapshot으로 condition을 평가하면 안전하지 않을 수 있음
-
-replicated database에서는 더 복잡함
-
-multi-leader나 leaderless replication은 여러 replica에서 concurrent write를 허용하므로 single up-to-date copy를 가정한 lock이나 compare-and-set이 잘 맞지 않음
-
-이 경우 conflicting versions를 sibling으로 남기고 application이나 data structure가 merge하는 방식이 필요할 수 있음
-
-last write wins는 단순하지만 lost update를 만들 수 있음
-
-<br>
-
-### Write Skew and Phantoms
-
-write skew는 두 transaction이 같은 data를 읽고 서로 다른 object를 update하면서 invariant를 깨뜨리는 문제임
-
-doctor on-call 예시에서는 Alice와 Bob이 모두 현재 on-call doctor가 2명이라고 읽고, 각각 자신을 off-call로 바꿈
-
-두 transaction은 서로 다른 row를 update하므로 dirty write나 lost update가 아님
-
-하지만 결과적으로 on-call doctor가 0명이 되어 invariant가 깨짐
-
-<img src="./img/figure7-8.png" width="80%" height="80%">
-<br>
-
-write skew는 lost update의 일반화로 볼 수 있음
-
-두 transaction이 같은 object를 update하면 lost update가 되고, 서로 다른 object를 update해도 같은 predicate에 의존하면 write skew가 될 수 있음
-
-atomic single-object operation으로는 해결되지 않음
-
-snapshot isolation의 lost update detection도 보통 write skew를 막지 못함
-
-true serializable isolation이 가장 직접적인 해결책임
-
-serializable isolation을 사용할 수 없다면 관련 row를 명시적으로 lock해야 할 수 있음
-
-하지만 meeting room booking처럼 아직 존재하지 않는 row의 absence를 확인하는 경우에는 `SELECT FOR UPDATE`로 lock할 row가 없음
-
-이때 한 transaction의 write가 다른 transaction의 search query 결과를 바꾸는 현상을 phantom이라고 함
-
-phantom은 write skew를 더 까다롭게 만듦
-
-materializing conflicts는 phantom을 concrete lock row로 바꾸는 우회 방법임
-
-예를 들어 room-time slot row를 미리 만들어두고 booking 전 해당 slot row를 lock할 수 있음
-
-하지만 concurrency control을 application data model에 새겨 넣는 방식이라 복잡하고 error-prone하므로 last resort에 가까움
-
-<br>
-
-### Serializability
-
-serializable isolation은 가장 강한 isolation level로 간주됨
-
-transaction이 실제로는 concurrent하게 실행되더라도 결과는 어떤 serial order로 실행한 것과 같아야 함
-
-application이 transaction을 하나씩 실행했을 때 올바르다면, serializable isolation에서는 concurrent하게 실행해도 올바름
-
-serializability를 구현하는 대표 방식은 세 가지임
-
-- actual serial execution
-- two-phase locking
-- serializable snapshot isolation
-
-<br>
-
-### Actual Serial Execution
-
-가장 단순한 방법은 transaction을 실제로 하나씩 serial order로 실행하는 것임
-
-concurrency를 없애면 conflict detection도 필요 없음
-
-이 방식은 active dataset이 memory에 들어가고, OLTP transaction이 짧을 때 현실적인 선택이 될 수 있음
-
-하지만 interactive transaction과는 맞지 않음
-
-application과 database가 query와 response를 여러 번 주고받으면 database가 network I/O를 기다리는 시간이 너무 커짐
-
-그래서 serial execution system은 보통 전체 transaction logic을 stored procedure로 database에 미리 보냄
-
-<img src="./img/figure7-9.png" width="80%" height="80%">
-<br>
-
-stored procedure는 debug, version control, deploy, monitoring이 어려울 수 있음
-
-하지만 modern system은 Java, Clojure, Lua 같은 general-purpose language를 사용해 이 문제를 줄이기도 함
-
-serial execution은 single thread throughput에 제한됨
-
-partitioning으로 각 partition마다 독립 transaction thread를 둘 수 있지만, transaction이 여러 partition을 건드리면 coordination이 필요하고 성능이 크게 떨어질 수 있음
-
-따라서 serial execution은 다음 조건에서 잘 맞음
-
-- transaction이 작고 빠름
-- active dataset이 memory에 들어감
-- write throughput이 단일 core 또는 독립 partition으로 감당 가능함
-- cross-partition transaction 비율이 낮음
-
-<br>
-
-### Two-Phase Locking
-
-two-phase locking, 2PL은 오랫동안 serializability를 구현하는 대표 방식이었음
-
-2PL은 two-phase commit, 2PC와 다른 개념임
-
-2PL에서는 reader와 writer가 서로 block할 수 있음
-
-transaction이 object를 읽으려면 shared lock이 필요하고, write하려면 exclusive lock이 필요함
-
-shared lock은 여러 transaction이 동시에 가질 수 있지만, exclusive lock은 혼자만 가질 수 있음
-
-transaction은 획득한 lock을 commit 또는 abort까지 유지함
-
-그래서 transaction 실행 중에는 lock을 얻는 phase가 있고, 끝날 때 lock을 release하는 phase가 있음
-
-2PL은 lost update, write skew, phantom 같은 race condition을 막을 수 있음
-
-하지만 성능 비용이 큼
-
-reader와 writer가 서로 block하므로 latency가 불안정해질 수 있음
-
-하나의 느린 transaction이나 많은 lock을 잡는 transaction이 전체 system을 밀리게 할 수 있음
-
-deadlock도 자주 발생할 수 있고, database는 deadlock을 감지하면 transaction 하나를 abort해야 함
-
-<br>
-
-### Predicate Locks and Index-Range Locks
-
-serializable isolation은 phantom도 막아야 함
-
-이를 개념적으로 해결하는 방법은 predicate lock임
-
-predicate lock은 특정 row 하나가 아니라 search condition에 matching되는 모든 object에 적용됨
-
-심지어 아직 존재하지 않지만 나중에 추가될 수 있는 row에도 적용되어야 함
-
-하지만 predicate lock은 많은 lock을 검사해야 하므로 성능이 좋지 않음
-
-그래서 실제 database는 보통 index-range lock을 사용함
-
-index-range lock은 predicate를 더 넓은 index range로 근사해 lock을 거는 방식임
-
-정확도는 떨어질 수 있지만 안전함
-
-필요 이상으로 넓게 lock할 수는 있어도, serializability를 깨뜨리는 write를 놓치지 않기 때문임
-
-적절한 index가 없다면 table 전체 lock으로 fallback할 수 있음
-
-성능은 좋지 않지만 safe한 선택임
-
-<br>
-
-### Serializable Snapshot Isolation
-
-serializable snapshot isolation, SSI는 snapshot isolation의 성능 장점을 유지하면서 serializability를 제공하려는 optimistic concurrency control 방식임
-
-2PL은 위험할 가능성이 있으면 먼저 block하는 pessimistic 방식임
-
-SSI는 transaction을 일단 계속 실행하게 두고, commit 시점에 serializability가 깨졌는지 검사함
-
-문제가 있으면 transaction을 abort하고 retry하게 함
-
-SSI는 snapshot isolation 위에서 동작함
-
-transaction은 consistent snapshot을 읽고, database는 serialization conflict를 감지함
-
-핵심은 transaction이 outdated premise를 기반으로 decision을 내렸는지 확인하는 것임
-
-write skew는 보통 transaction이 어떤 data를 읽고 그 결과를 premise로 삼아 write할 때 발생함
-
-commit 시점에 그 premise가 더 이상 참이 아니라면 transaction을 abort해야 함
-
-<img src="./img/figure7-10.png" width="80%" height="80%">
-<br>
-
-첫 번째 감지 대상은 stale MVCC read임
-
-transaction이 snapshot을 읽는 동안 다른 transaction의 uncommitted write를 무시했는데, commit 시점에는 그 write가 commit되어 있을 수 있음
-
-이 경우 읽었던 premise가 outdated되었을 수 있음
-
-<img src="./img/figure7-11.png" width="80%" height="80%">
-<br>
-
-두 번째 감지 대상은 prior read에 영향을 주는 later write임
-
-database는 어떤 transaction이 어떤 index range를 읽었는지 기록해두고, 다른 transaction이 그 range에 write할 때 conflict 가능성을 표시함
-
-SSI의 장점은 reader와 writer가 서로 block하지 않는다는 점임
-
-따라서 query latency가 2PL보다 예측 가능할 수 있음
-
-또한 serial execution처럼 단일 CPU core throughput에만 묶이지 않을 수 있음
-
-단점은 abort rate가 성능에 큰 영향을 준다는 점임
-
-contention이 높거나 read-write transaction이 오래 실행되면 retry 비용이 커질 수 있음
-
-<br>
-
-### Summary
-
-transaction은 application이 일부 concurrency problem과 fault를 직접 다루지 않아도 되게 해주는 abstraction임
-
-많은 복잡한 failure case를 transaction abort와 retry라는 단순한 형태로 줄여줌
-
-하지만 모든 application이 transaction을 같은 수준으로 필요로 하지는 않음
-
-single record만 읽고 쓰는 단순한 pattern은 transaction 없이도 충분할 수 있음
-
-반면 여러 object, denormalized data, secondary index, invariant를 함께 다루는 application은 transaction이 없으면 reasoning이 어려워짐
-
-이 장에서 다룬 주요 anomaly는 다음과 같음
-
-- dirty reads: commit되지 않은 write를 읽음
-- dirty writes: commit되지 않은 write를 다른 transaction이 덮어씀
-- read skew: 한 transaction이 database의 서로 다른 부분을 서로 다른 시점으로 봄
-- lost updates: concurrent read-modify-write 중 한쪽 변경이 사라짐
-- write skew: 같은 premise를 읽고 서로 다른 object를 update해 invariant가 깨짐
-- phantom reads: search condition의 결과가 다른 transaction의 write로 바뀜
-
-weak isolation level은 일부 anomaly만 막음
-
-serializable isolation은 가장 강한 guarantee를 제공하지만 구현 방식에 따라 성능과 확장성 trade-off가 있음
-
-actual serial execution은 단순하지만 transaction이 작고 빠르며 memory-resident workload에 잘 맞음
-
-2PL은 강한 isolation을 제공하지만 blocking과 deadlock, latency 문제가 있음
-
-SSI는 optimistic하게 실행하고 commit 시 conflict를 감지해 abort하는 방식으로, serializability와 성능 사이의 현실적인 절충을 제공함
+#### Summary — 정리
+
+- atomicity는 부분 반영, isolation은 동시 실행의 간섭을 다룸
+- read committed·snapshot isolation에는 여전히 남는 anomaly가 있음
+- serializability는 실제 순차 실행, 2PL, SSI 등으로 구현할 수 있으며 대기·재시도·확장 비용이 다름
+- 업무 invariant와 실제 database 보장을 함께 확인해야 함

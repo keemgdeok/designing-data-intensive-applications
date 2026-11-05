@@ -2,617 +2,207 @@
 
 ### 12장. The Future of Data Systems
 
-이 장은 앞 장들의 내용을 바탕으로 data system의 미래 방향을 논의함
-
-앞 장들이 현재의 system을 설명했다면, 이 장은 더 나은 application을 어떻게 설계할 수 있는지 제안함
-
-핵심 목표는 reliability, scalability, maintainability를 넘어서 correctness와 human impact까지 함께 고려하는 것임
-
-책의 마지막 장인 만큼 저자의 의견과 추측이 많이 포함되어 있음
-
-따라서 product 예시나 기술 전망은 원문 당시 기준으로 이해하고, 실제 운영 판단에는 현재 공식 문서를 확인해야 함
+- 원문: 초판, 본문 pp. 489–544 / PDF pp. 511–566. 참고문헌은 PDF p. 567부터 시작함
+- 핵심: 원본에서 파생 상태를 만들고, 정확성·변경 용이성·데이터 사용의 영향을 함께 설계함
+- 정비 관점: 원본 작업 기록, 현재 장착 현황, 통계, 감사 자료를 같은 이력에서 만들고 서로 대조하는 문제와 유사함
+- 이 장에는 2017년 당시 저자의 제안과 전망이 포함됨. 현재의 보편적 운영 규칙으로 단정하지 않음
 
 <br>
 
-### Data Integration
+#### Data Integration — 여러 도구의 데이터를 연결
 
-하나의 tool이 모든 workload에 최적일 수는 없음
+- 저장·검색·분석·추천은 접근 패턴이 달라 하나의 도구가 모두에 최적이기는 어려움
+- 여러 도구를 쓰면 같은 정보의 표현을 일관되게 유지하는 문제가 생김
+- 원본과 파생 데이터의 관계를 먼저 정해야 함
 
-storage engine, replication, query model, processing model은 각각 trade-off가 다름
+##### Combining Specialized Tools by Deriving Data — 원본에서 다시 만들기
 
-복잡한 application은 같은 data를 여러 방식으로 사용함
+- system of record는 충돌·손실 시 판단 기준이 되는 authoritative source임
+- derived data는 원본을 변환한 색인·cache·집계·모델 등임
 
-예를 들어 OLTP database, full-text search index, cache, data warehouse, recommendation system이 함께 필요할 수 있음
+###### Reasoning About Dataflows — 원본과 파생 경로 추적
 
-따라서 중요한 문제는 여러 specialized tool을 어떻게 안전하게 조합할 것인가임
+- 원본 변경을 ordered log로 전달하면 독립된 dual write보다 변경 순서를 추적하기 쉬움
+- 재시도·재생 시 같은 효과를 내려면 deterministic 변환과 idempotent 적용 등이 필요함
 
-<br>
+###### Derived Data Versus Distributed Transactions — 가시성 시점의 차이
 
-### Combining Specialized Tools by Deriving Data
+- distributed transaction의 atomic commit과 비동기 파생 처리는 가시성 시점이 다름. 둘을 동일한 보장으로 취급하면 안 됨
+- atomic commit 자체가 serializability나 linearizability를 자동 제공하는 것도 아님
 
-여러 system을 조합할 때 기준은 system of record와 derived data를 분리하는 것임
+###### The Limits of Total Ordering — 전역 순서의 비용
 
-system of record는 write가 처음 들어오는 authoritative source임
+- 모든 event의 전역 순서를 하나로 정하면 규모·지역·offline 동작에서 병목이 될 수 있음
 
-derived data는 search index, materialized view, cache, analytics table처럼 원본에서 다시 만들 수 있는 data임
+###### Ordering Events to Capture Causality — 필요한 의존 순서 보존
 
-derived data를 원본에서 deterministic하게 만들 수 있으면 장애나 bug 이후 재처리가 쉬워짐
+- 의존 관계가 있는 event의 causal order를 보존하고, 독립된 event는 분산 처리하는 접근을 검토할 수 있음
+- 외부 알림처럼 되돌리기 어려운 효과가 있으면 순서가 뒤바뀐 뒤 단순히 재계산하는 것으로 해결되지 않음
 
-반대로 application이 여러 system에 직접 dual write하면 ordering과 partial failure 문제가 생김
+##### Batch and Stream Processing — 과거 재계산과 새 변경 연결
 
-<br>
+- batch는 고정된 과거 입력, stream은 계속 들어오는 변경을 처리함
+- 둘 다 입력에서 파생 상태를 만든다는 공통점이 있음
 
-### Reasoning About Dataflows
+###### Maintaining Derived State — 새 변경으로 현재 view 갱신
 
-data integration에서는 input과 output을 명확히 해야 함
+- stream으로 현재 view를 갱신함. 끝나지 않는 입력을 처리하므로 operator state와 복구 지점을 관리해야 함
 
-어느 system이 write ordering을 결정하는지, 어떤 representation이 어떤 source에서 파생되는지 분명해야 함
+###### Reprocessing Data for Application Evolution — 과거 자료로 새 view 생성
 
-change data capture나 event sourcing log를 사용하면 같은 event order를 기준으로 여러 derived system을 갱신할 수 있음
+- batch·replay로 새 구조를 만들거나 오류를 수정할 수 있음
+- 새 view를 별도로 만든 뒤 일부 요청부터 전환하면 migration을 단계적으로 검토할 수 있음
 
-중요한 것은 CDC를 쓰느냐 event sourcing을 쓰느냐보다, write order를 하나의 log로 결정하고 그 순서대로 파생 data를 만드는 것임
+###### The Lambda Architecture — 두 처리 경로의 결합
 
-derived update는 deterministic하고 idempotent하게 만들 수 있어야 함
+- lambda architecture는 batch layer와 speed layer를 병행함
+- 빠른 최근 결과와 과거 재계산을 결합하지만 logic 중복과 결과 병합 비용이 생김
 
-그래야 fault 이후 retry와 replay가 쉬워짐
+###### Unifying Batch and Stream Processing — 같은 logic으로 과거와 현재 처리
 
-<br>
-
-### Derived Data Versus Distributed Transactions
-
-여러 storage system을 일관되게 유지하는 전통적 방법은 distributed transaction임
-
-distributed transaction은 lock과 atomic commit으로 write ordering과 exactly-once effect를 제공함
-
-log-based derived data는 ordered log, deterministic retry, idempotence로 비슷한 목표를 달성하려고 함
-
-큰 차이는 timing guarantee임
-
-distributed transaction은 보통 linearizability나 read-your-own-writes 같은 성질을 제공함
-
-log-based derived system은 보통 asynchronous라서 같은 timeliness를 기본으로 제공하지 않음
-
-하지만 heterogeneous system 사이에서 XA 같은 distributed transaction은 성능과 fault tolerance에 제약이 큼
-
-책은 log-based derived data가 여러 data system을 통합하는 더 실용적인 방향이라고 봄
+- 하나의 처리 logic으로 과거 replay와 새 event를 다루려면 재현 가능한 상태·시간·실패 처리 규칙이 필요함
 
 <br>
 
-### The Limits of Total Ordering
+#### Unbundling Databases — 내부 기능을 dataflow로 조합
 
-작은 system에서는 하나의 leader가 모든 event의 total order를 정할 수 있음
+- database 내부의 index·view·log·실행 기능을 여러 전문 도구로 나눠 연결하는 관점임
+- 하나의 통합 제품이 요구를 충족하면 분해로 생기는 운영 비용이 더 클 수 있음
 
-하지만 scale이 커지면 total order는 병목이 됨
+##### Composing Data Storage Technologies — 저장·조회 도구 연결
 
-문제가 되는 경우는 다음과 같음
+- database 내부의 secondary index 갱신도 원본 변경에서 파생 상태를 만드는 과정임
+- 같은 원리를 database 밖의 검색 색인·warehouse·cache에 적용할 수 있음
+- 비동기 log는 생산자와 소비자의 직접적인 대기를 줄이고, 팀 간 event interface를 제공함
+- 소비자가 중단되면 뒤처진 변경을 따라잡을 수 있지만 보관 기간·적체·schema 변경을 관리해야 함
 
-- event throughput이 단일 leader가 처리할 수 있는 범위를 넘는 경우
-- 여러 datacenter가 독립적으로 write를 받아야 하는 경우
-- microservice마다 독립적인 durable state를 갖는 경우
-- offline client가 local state를 먼저 변경하는 경우
+###### Unbundled Versus Integrated Systems — 조합의 이득과 운영 비용
 
-total order broadcast는 consensus와 동등한 문제임
+- 분해한 시스템은 monitoring·배포·보안·장애 조사의 접점이 늘어남. 조합의 이득과 운영 비용을 비교해야 함
 
-따라서 모든 event를 전역 순서로 정렬하려는 설계는 scale과 availability에서 비용이 큼
+##### Designing Applications Around Dataflow — 변경에 반응하는 코드
 
-<br>
+###### Application Code as a Derivation Function — 변경을 상태로 변환
 
-### Ordering Events to Capture Causality
+- application code를 “입력 변경에서 새 상태를 도출하는 함수”로 볼 수 있음
+- 기준 정보가 바뀌면 이를 사용하는 색인·집계·화면 상태도 갱신하는 구조임
 
-모든 event에 전역 순서가 필요한 것은 아님
+###### Separation of Application Code and State — 실행과 영속 상태 분리
 
-causal dependency가 없는 concurrent event는 임의 순서로 처리해도 문제가 없을 수 있음
+- 코드 배포와 durable state 관리를 분리하되, state 변경의 전달·복구를 명확히 해야 함
 
-하지만 어떤 event가 다른 event의 결과나 전제라면 causal order를 보존해야 함
+###### Stream Processors and Services — 요청 조회와 변경 구독
 
-예를 들어 친구 관계 삭제 이후 보낸 message가 이전 친구에게 notification으로 전달되면 안 됨
+- 매 요청마다 원격 서비스를 호출하는 대신 참조 정보의 변경을 구독해 local state로 유지할 수 있음
+- 예를 들어 환율·부품 설명 정보를 event와 결합할 때 최신 값을 쓸지 당시 version을 쓸지 명시해야 함
+- 동기 RPC는 즉시 답을 얻는 경로, stream은 지속적으로 상태를 전달하는 경로임. 지연과 오류의 노출 방식이 다름
 
-이 문제는 message stream과 friend list를 join할 때 time-dependence를 놓친 사례임
+##### Observing Derived State — 쓰기 경로와 읽기 경로
 
-가능한 접근은 다음과 같음
+- write path는 원본 변경이 처리 단계를 거쳐 파생 상태에 반영되는 경로임
+- read path는 query가 파생 상태를 읽어 결과를 만드는 경로임
+- 미리 계산하는 범위를 늘리면 읽기는 빨라질 수 있지만 갱신 비용과 지연 관리가 늘어남
 
-- logical timestamp로 coordination 없이 순서를 표현함
-- 사용자가 본 state를 event에 함께 기록하고 이후 event가 이를 참조하게 함
-- conflict resolution으로 예상 밖의 순서로 도착한 event를 처리함
+<img src="./img/figure12-1.png" width="80%" height="80%" alt="그림 12-1. document update의 write path와 query의 read path가 검색 색인에서 만나는 구조"/>
 
-단순한 해법은 없으며, application이 causal dependency를 명시적으로 다루는 것이 중요함
+###### Stateful, Offline-Capable Clients — client까지 이어지는 상태
 
-<br>
+- 화면도 파생 상태의 소비자로 볼 수 있음. 변경 구독은 조회 결과를 계속 갱신하는 방식임
+- offline client는 local state를 유지하고 나중에 동기화함. 충돌·version·재접속 복구가 필요함
 
-### Batch and Stream Processing
+###### Reads Are Events Too — 요청이 의존한 조회 상태
 
-data integration의 목표는 data가 올바른 form으로 올바른 place에 도달하게 하는 것임
+- 사용자가 본 상태와 이후 요청의 의존성을 함께 전달하면 read-your-writes와 인과관계 처리에 도움됨
 
-이를 위해 input을 consume하고, transform하고, join하고, filter하고, aggregate하고, output을 생성해야 함
+###### Multi-Partition Data Processing — 조회·처리 단계의 완료 조건
 
-batch processing과 stream processing은 이 목표를 달성하는 주요 도구임
-
-batch는 bounded input을 처리하고, stream은 unbounded input을 처리함
-
-하지만 둘 다 immutable input에서 derived output을 만드는 dataflow라는 점에서 공통점이 큼
-
-현대 processing engine에서는 batch와 stream의 경계가 점점 흐려짐
-
-<br>
-
-### Maintaining Derived State
-
-batch processing은 deterministic function을 선호함
-
-input을 수정하지 않고 output을 새로 만들기 때문에 fault tolerance와 reasoning이 쉬움
-
-stream processing도 같은 원칙을 따르지만, unbounded input을 처리하기 위해 managed state와 checkpoint가 필요함
-
-derived state를 유지할 때는 state change를 functional application code에 통과시켜 새로운 derived state를 만드는 관점이 유용함
-
-asynchronous event log는 한 component의 장애를 다른 component로 전파하지 않게 함
-
-반대로 distributed transaction은 participant 하나의 장애가 전체 transaction failure로 확산될 수 있음
+- 여러 partition에 걸친 조회·처리도 중간 상태와 완료 조건을 정해야 함
 
 <br>
 
-### Reprocessing Data for Application Evolution
+#### Aiming for Correctness — 전체 경로의 정확성
 
-stream processing은 새 change를 낮은 delay로 derived view에 반영함
+- database가 transaction을 제공해도 잘못된 업무 코드·중복 요청·외부 효과는 남음
+- 보장 범위를 client부터 최종 결과까지 연결해 검토해야 함
 
-batch processing은 accumulated historical data를 다시 처리해 새로운 view를 만들 수 있음
+##### The End-to-End Argument for Databases — 끝단까지 작업 ID 유지
 
-reprocessing은 application evolution에 중요함
+- TCP의 중복 제거는 한 연결 안의 전송을 다룸. 사용자의 재요청이 같은 업무인지까지 판단하지 못함
+- database transaction도 새로운 요청으로 들어온 동일 업무를 자동 식별하지 못함
+- client가 만든 request ID를 끝까지 전달하고, 같은 ID의 완료 여부와 실제 변경을 함께 기록하는 방법을 사용할 수 있음
+- deduplication 기록과 효과가 따로 저장되면 그 사이의 crash에서 중복·누락이 발생할 수 있음
+- 중복 판정 기간과 ID 충돌 처리도 정의해야 함. “재시도 가능”이라는 표현만으로 정확성이 확보되지는 않음
 
-schema나 data model을 크게 바꿔야 할 때 기존 data를 새 model로 다시 파생할 수 있기 때문임
+##### Enforcing Constraints — 같은 자원을 같은 판정 지점으로 보내기
 
-old view와 new view를 나란히 유지하고 일부 user만 new view로 보내면 migration을 점진적으로 수행할 수 있음
+- uniqueness는 같은 이름·자원을 요구하는 요청 중 무엇을 승인할지 결정하는 문제임
+- 충돌 가능한 요청을 같은 partition으로 모아 순서대로 검사하면 판정 범위를 줄일 수 있음
+- client는 결과를 기다려 최종 승인 여부를 알거나, 일단 pending으로 두고 나중에 결과를 받을 수 있음
 
-문제가 생기면 old view로 되돌릴 수 있어 irreversible damage의 위험이 줄어듦
+###### Multi-Partition Request Processing — 여러 partition의 변경 연결
 
-<br>
+- 여러 partition에 걸친 작업은 durable한 요청에서 각 partition의 instruction을 만들고 ID로 중복을 제거하는 접근이 가능함
+- 이 접근이 모든 변경을 같은 순간에 보이게 하는 것은 아님. 중간 상태·실패 복구·완료 조건을 별도로 정의해야 함
+- 잔액·재고·예약 같은 제약은 서로 다른 규칙이 있음. 전달 보장만으로 업무 invariant가 자동 유지되지는 않음
 
-### The Lambda Architecture
+##### Timeliness and Integrity — 늦음과 잘못됨 구분
 
-lambda architecture는 immutable event log에서 batch view와 stream view를 함께 만드는 방식임
+| 속성 | 문제 | 필요한 대응 |
+| --- | --- | --- |
+| timeliness | 올바른 변경이 아직 보이지 않음 | 지연 축소, 대기, 진행 상태 표시 |
+| integrity | 누락·중복·모순·잘못된 값 | 감지, 원인 수정, 대조·복구 |
 
-stream layer는 최근 event를 빠르게 처리해 approximate view를 만들고, batch layer는 전체 historical data를 다시 처리해 corrected view를 만듦
+- 시간이 지나면 정상적으로 따라잡는 지연과, 기다려도 고쳐지지 않는 손상을 구분해야 함
+- 비동기 처리도 durable log·중복 방지·올바른 변환으로 integrity를 유지할 수 있음
 
-이 접근은 immutable event와 reprocessing의 가치를 널리 알렸다는 점에서 의미가 있음
+###### Coordination-Avoiding Data Systems — 조정 범위 줄이기
 
-하지만 실무상 문제가 큼
+- 모든 단계를 동기적으로 기다리게 하면 지연·장애가 더 넓게 전파될 수 있음
+- 일부 업무는 사후 검증과 보정으로 조정을 줄일 수 있음. 즉시 보장이 필요한 제약과는 구분해야 함
+- 정비 비유에서 통계 화면의 갱신 지연과 작업 기록 누락은 다른 문제임. 실제 안전 판단을 사후 보정으로 대체하자는 의미는 아님
 
-- 같은 logic을 batch framework와 stream framework에 각각 유지해야 함
-- 두 output을 query 시점에 merge해야 함
-- 큰 dataset을 자주 전체 재처리하기 어렵고 incremental batch가 다시 복잡해짐
+##### Trust, but Verify — 보장을 독립적으로 확인
 
-결국 stream layer와 batch layer를 분리하면 operational complexity가 커짐
+- 알고리즘은 저장·memory·CPU 등이 모델의 가정대로 동작한다고 전제함. 실제 환경에는 bug와 손상도 있음
+- checksum은 일부 손상을 검출하고, 원본과 파생 상태의 대조는 logic 오류·누락을 찾는 데 도움됨
+- backup은 존재 여부뿐 아니라 복구 가능한지 확인해야 함
 
-<br>
+###### Designing for Auditability — 입력부터 결과까지 대조
 
-### Unifying Batch and Stream Processing
-
-batch와 stream을 하나의 system에서 처리하면 lambda architecture의 장점을 유지하면서 중복을 줄일 수 있음
-
-이를 위해 필요한 기능은 다음과 같음
-
-- historical event를 같은 processing engine으로 replay할 수 있어야 함
-- fault가 있어도 output이 한 번 처리된 것처럼 보이는 exactly-once semantics가 필요함
-- processing time이 아니라 event time 기준 windowing을 지원해야 함
-
-이 방향은 batch를 stream의 특수한 경우로 보거나, stream을 작은 batch의 연속으로 보는 관점을 가능하게 함
-
-핵심은 같은 logic으로 과거 data와 새 event를 모두 처리하는 것임
-
-<br>
-
-### Unbundling Databases
-
-database, filesystem, batch processor, stream processor는 모두 data를 저장하고 처리한다는 공통점을 가짐
-
-database가 제공하는 기능을 분해해 보면 storage, indexing, query execution, transaction, materialized view maintenance 같은 component로 볼 수 있음
-
-unbundling databases는 이 기능들을 하나의 monolithic database 안에 묶지 않고, specialized component와 dataflow로 조합하는 관점임
-
-하지만 목적은 database를 없애는 것이 아님
-
-database는 여전히 state 저장, query serving, stream processor state 관리에 필요함
-
-unbundling의 가치는 단일 database가 모든 workload를 만족하지 못할 때 여러 system을 조합할 수 있게 하는 데 있음
+- audit 가능한 구조는 입력, 처리 version, 중간 근거, 최종 결과를 연결해 추적할 수 있어야 함
+- 같은 잘못된 logic으로 결과를 다시 계산하는 것만으로 모든 오류를 찾을 수는 없음. 독립적인 대조 기준이 필요함
 
 <br>
 
-### Composing Data Storage Technologies
+#### Doing the Right Thing — 데이터 사용이 만드는 영향
 
-heterogeneous storage system을 동기화할 때 distributed transaction보다 event log와 idempotent consumer가 더 단순한 abstraction이 될 수 있음
+- 기술적으로 정확한 처리와 사람에게 정당한 사용은 다른 검토 대상임
+- 책은 수집·예측·분류가 사용자에게 미치는 결과를 개발자의 책임에 포함함
 
-log-based integration의 장점은 두 가지임
+##### Predictive Analytics — 분류 오류와 자기강화
 
-- system level에서 producer와 consumer가 느슨하게 연결되어 component 장애가 전체 장애로 확산되지 않음
-- human level에서 team이 well-defined event interface를 기준으로 독립적으로 개발할 수 있음
+- 예측은 상관관계에 기반할 수 있으며, 개인의 행동이나 능력을 확정적으로 설명하지는 못함
+- false positive·false negative의 피해가 누구에게 돌아가는지 봐야 함
+- 데이터 편향과 설명·이의제기의 부재는 불이익을 반복할 수 있음
 
-consumer가 느리거나 실패해도 event log가 buffer 역할을 함
+###### Feedback Loops — 예측이 다음 관측을 바꾸는 문제
 
-고장난 consumer는 복구 후 뒤처진 event를 따라잡으면 됨
+- 예측에 따라 기회나 관측을 바꾸면 다음 학습 데이터도 바뀜. feedback loop가 기존 차이를 강화할 수 있음
+- 정비 데이터에서도 경고가 많은 장비를 더 자주 점검하면 결함 발견 건수가 함께 늘 수 있음. 관측·점검 빈도와 실제 상태를 구분해야 함
 
-<br>
+##### Privacy and Tracking — 수집 목적과 통제권
 
-### Unbundled Versus Integrated Systems
-
-unbundling이 항상 좋은 것은 아님
-
-여러 infrastructure를 운영하면 learning curve, configuration, monitoring, debugging 비용이 늘어남
-
-하나의 integrated product가 필요한 workload를 충분히 잘 처리한다면 그 product를 쓰는 편이 낫음
-
-필요 없는 scale을 위해 복잡한 architecture를 만드는 것은 premature optimization임
-
-unbundling은 하나의 tool이 요구사항을 모두 만족하지 못할 때 선택할 수 있는 composition 방식임
+- 사용자가 의도적으로 맡긴 정보와 배경에서 추적한 활동 정보는 기대와 권력관계가 다름
+- 긴 약관에 동의했다는 사실만으로 실제 선택권과 이해가 충분했다고 볼 수는 없음
+- 데이터는 업무 개선뿐 아니라 감시·차별·유출에도 쓰일 수 있음
+- 저자는 목적에 맞는 수집·보관, 불필요한 데이터 삭제, 사용 방식의 설명과 사용자 통제를 강조함
+- 이는 책의 윤리적 논의임. 특정 국가의 현행 법률·보관 기간을 안내하는 내용은 아님
 
 <br>
 
-### Designing Applications Around Dataflow
-
-dataflow 중심 application은 database를 passive mutable variable로만 보지 않음
-
-state change를 stream으로 보고, application code가 그 change에 반응해 다른 state change를 만들어내는 구조로 봄
-
-spreadsheet가 input cell 변경에 따라 formula result를 자동 재계산하듯, data system도 base data 변경에 따라 index, cache, materialized view를 갱신할 수 있어야 함
-
-차이는 data system이 durable storage, fault tolerance, scalability, heterogeneous integration을 함께 만족해야 한다는 점임
-
-<br>
-
-### Application Code as a Derivation Function
-
-derived dataset은 어떤 transformation function의 결과임
-
-secondary index는 base table에서 indexed field를 뽑아 정렬한 derived dataset임
-
-full-text search index는 tokenization, stemming, synonym 처리 같은 domain-specific function을 적용해 만들어짐
-
-machine learning model은 training data에서 feature extraction과 statistical analysis를 거쳐 파생됨
-
-cache는 UI가 필요로 하는 형태로 data를 미리 계산한 derived view임
-
-문제는 application-specific derivation이 database built-in 기능만으로는 충분하지 않다는 점임
-
-따라서 application code를 dataflow 안의 derivation function으로 실행할 수 있어야 함
-
-<br>
-
-### Separation of Application Code and State
-
-현대 application은 application code 실행과 durable state 관리를 분리하는 경향이 있음
-
-application server는 stateless하게 배포되고, persistent state는 database에 저장됨
-
-이 구조는 deployment와 scaling을 단순하게 만들지만, database가 passive variable처럼 취급되는 문제가 있음
-
-대부분의 database는 값을 읽을 수는 있지만, 값의 change를 자연스럽게 subscribe하는 model은 약함
-
-dataflow 관점에서는 application code가 state change stream을 구독하고, 그 결과로 다른 state change를 생성함
-
-이는 database trigger, secondary index update, stream processing을 database 밖으로 확장한 model임
-
-<br>
-
-### Stream Processors and Services
-
-microservice architecture는 synchronous request-response로 service를 조합하는 경우가 많음
-
-dataflow architecture는 asynchronous event stream으로 operator를 조합함
-
-예를 들어 purchase 처리에서 exchange rate service를 매번 RPC로 호출하는 대신, exchange rate update stream을 구독해 local state에 유지할 수 있음
-
-purchase event를 처리할 때는 local state와 join하면 됨
-
-이 방식은 network request를 줄이고 failure에 강함
-
-다만 join은 time-dependent하므로 event가 발생한 시점의 exchange rate를 사용해야 함
-
-<br>
-
-### Observing Derived State
-
-write path는 data가 system에 들어와 여러 processing stage를 거쳐 derived dataset을 갱신하는 경로임
-
-read path는 user request가 derived dataset을 읽고 response를 만드는 경로임
-
-derived dataset은 write path와 read path가 만나는 지점임
-
-<img src="./img/figure12-1.png" width="80%" height="80%">
-<br>
-
-figure 12-1은 document update가 search index로 반영되는 write path와 query가 search result를 만드는 read path를 보여줌
-
-index, cache, materialized view는 write path와 read path 사이의 boundary를 옮기는 도구임
-
-write path에서 더 많이 precompute하면 read path가 빨라짐
-
-반대로 write path를 단순하게 두면 read path가 더 많은 work를 수행해야 함
-
-<br>
-
-### Stateful, Offline-Capable Clients
-
-전통적인 web application은 client를 stateless하게 보고 server가 data authority를 갖는 구조가 많았음
-
-하지만 browser와 mobile app은 local storage와 rich interaction을 갖게 되었음
-
-offline-first application은 device local database를 사용해 network 없이도 동작하고, 연결이 가능할 때 server와 sync함
-
-이 관점에서는 end-user device도 dataflow의 일부가 됨
-
-server에서 client로 state change를 push하면 UI는 read path의 끝에서 derived state를 관찰하는 component가 됨
-
-reads도 event로 기록하면 query가 어떤 state를 보고 이루어졌는지 추적할 수 있음
-
-<br>
-
-### Aiming for Correctness
-
-correctness는 단순히 database가 transaction을 지원한다고 자동으로 보장되지 않음
-
-application bug, 잘못된 retry, duplicate request, partial failure는 여전히 data corruption을 만들 수 있음
-
-serializability와 atomic commit은 강력하지만 비용이 크고, 특히 geographically distributed system이나 heterogeneous storage에서는 제약이 큼
-
-따라서 dataflow architecture에서도 correctness를 달성할 수 있는 abstraction이 필요함
-
-<br>
-
-### The End-to-End Argument for Databases
-
-exactly-once는 operation이 retry되더라도 최종 effect가 한 번 실행된 것과 같아야 한다는 뜻임
-
-이를 위해서는 operation을 idempotent하게 만들거나 duplicate를 suppress해야 함
-
-TCP는 packet duplicate를 connection 안에서 제거할 수 있지만, user가 timeout 이후 같은 HTTP request를 다시 보내는 문제까지 해결하지 못함
-
-database transaction도 client와 server 사이의 한 구간만 다룰 뿐, end-user device부터 database까지 전체 path를 보장하지 못함
-
-따라서 request ID 같은 operation identifier를 end-to-end로 전달해야 함
-
-같은 request ID가 이미 처리되었다면 다시 실행하지 않게 해야 함
-
-end-to-end argument의 핵심은 correctness function이 endpoint application의 도움 없이 lower layer만으로 완전히 구현될 수 없다는 점임
-
-<br>
-
-### Enforcing Constraints
-
-uniqueness constraint는 distributed setting에서 consensus가 필요한 문제임
-
-동일한 username을 여러 client가 동시에 요청하면 system은 하나만 accept하고 나머지는 reject해야 함
-
-log-based messaging에서는 unique value 기준으로 partition을 나누고, 해당 partition의 stream processor가 순서대로 request를 처리할 수 있음
-
-같은 username request는 같은 partition에 들어가므로 processor가 deterministic하게 승자를 정할 수 있음
-
-이 방식은 username뿐 아니라 account balance, inventory, booking 같은 constraint에도 응용될 수 있음
-
-핵심은 conflict 가능성이 있는 write를 같은 partition으로 보내고 sequential하게 validation하는 것임
-
-<br>
-
-### Multi-Partition Request Processing
-
-여러 partition을 건드리는 operation은 더 복잡함
-
-전통적인 database는 atomic commit으로 여러 partition의 변경을 하나의 transaction처럼 처리함
-
-log-based approach는 먼저 client request를 하나의 durable message로 기록한 뒤, stream processor가 이를 여러 output instruction으로 파생함
-
-예를 들어 money transfer는 request ID 기준 log에 먼저 기록되고, 이후 debit instruction과 credit instruction으로 분리될 수 있음
-
-downstream processor는 request ID로 duplicate를 제거함
-
-이렇게 하면 multi-partition atomic commit 없이도 같은 request가 각 account에 한 번만 적용되게 만들 수 있음
-
-<br>
-
-### Timeliness and Integrity
-
-consistency라는 말은 두 요구사항을 섞어서 부르는 경우가 많음
-
-timeliness는 user가 최신 상태를 관찰하는 성질임
-
-replication lag 때문에 stale data를 읽는 문제는 timeliness 문제임
-
-integrity는 data loss, contradiction, false data가 없는 성질임
-
-derived dataset이 underlying data를 올바르게 반영하지 못하면 integrity violation임
-
-timeliness violation은 기다리면 해결될 수 있지만, integrity violation은 명시적인 repair 없이는 계속 남음
-
-따라서 많은 application에서는 timeliness보다 integrity가 더 중요함
-
-event-based dataflow system은 timeliness와 integrity를 분리해서 생각하게 해줌
-
-asynchronous processing은 timeliness를 약하게 만들 수 있지만, exactly-once processing과 idempotence로 integrity를 지킬 수 있음
-
-<br>
-
-### Coordination-Avoiding Data Systems
-
-모든 constraint가 synchronous coordination을 요구하지는 않음
-
-어떤 constraint는 일단 operation을 받아들이고 나중에 asynchronous check로 검증할 수 있음
-
-check가 실패하면 compensating action이나 apology가 필요할 수 있음
-
-이 방식은 모든 request를 global coordination에 묶지 않으므로 performance와 fault tolerance에 유리함
-
-다만 recovery가 불가능한 operation이나 강한 즉시 보장이 필요한 constraint에는 synchronous coordination이 필요함
-
-핵심은 integrity를 유지하면서 coordination이 꼭 필요한 부분을 작게 만드는 것임
-
-<br>
-
-### Trust, but Verify
-
-software와 hardware는 언제든 bug나 corruption을 만들 수 있음
-
-따라서 system이 제공한다고 약속한 guarantee를 맹목적으로 믿기보다, 실제 data integrity를 계속 확인해야 함
-
-backup도 존재한다는 사실만으로 충분하지 않음
-
-복구를 정기적으로 시도해 봐야 backup이 실제로 쓸 수 있는지 알 수 있음
-
-auditability는 finance에만 필요한 성질이 아님
-
-data-intensive application이 커질수록 corruption을 빠르게 발견하고 원인을 추적하는 능력이 중요함
-
-<br>
-
-### Designing for Auditability
-
-mutable database state만 남아 있으면 나중에 어떤 logic이 왜 그 변경을 만들었는지 알기 어려움
-
-event sourcing은 user input을 immutable event로 기록하고, state update를 그 event에서 파생함
-
-derivation이 deterministic하면 같은 event log와 같은 code version으로 같은 state를 다시 만들 수 있음
-
-이는 integrity check와 debugging을 쉽게 함
-
-derived state가 의심되면 event log에서 다시 계산해 비교할 수 있음
-
-event log에는 hash나 cryptographic technique을 적용해 corruption 여부를 검증할 수 있음
-
-end-to-end integrity check는 disk, network, service, algorithm을 모두 포함해 더 강한 신뢰를 제공함
-
-<br>
-
-### Doing the Right Thing
-
-data system은 기술적 목적만 갖지 않음
-
-system이 수집하고 처리하는 data는 사람의 행동, 관심사, 정체성과 연결되어 있음
-
-따라서 engineer는 reliability와 scalability뿐 아니라 system이 사람에게 미치는 영향을 고려해야 함
-
-기술은 그 자체로 선하거나 악한 것이 아니라, 어떻게 사용되고 어떤 결과를 만드는지가 중요함
-
-책은 data-intensive application을 만드는 사람이 ethical responsibility를 회피해서는 안 된다고 주장함
-
-<br>
-
-### Predictive Analytics
-
-predictive analytics는 날씨나 질병 확산 예측처럼 공익에 쓰일 수 있음
-
-하지만 loan, insurance, employment, policing, sentencing처럼 개인의 삶에 직접 영향을 주는 decision에도 쓰일 수 있음
-
-algorithmic decision은 사람의 bias를 제거한다고 보장하지 않음
-
-training data에 bias가 있으면 model은 그 bias를 학습하고 확대할 수 있음
-
-특히 protected trait와 상관된 proxy feature가 있으면 차별이 우회적으로 재생산될 수 있음
-
-model output은 probabilistic하므로 개인별 판단에서 틀릴 수 있음
-
-따라서 automated decision에는 accountability, transparency, appeal mechanism이 필요함
-
-<br>
-
-### Feedback Loops
-
-predictive system은 feedback loop를 만들 수 있음
-
-recommendation system은 사용자가 이미 동의하는 정보만 보여 echo chamber를 강화할 수 있음
-
-credit score를 hiring에 사용하면 실직과 낮은 score가 서로를 악화시키는 악순환이 생길 수 있음
-
-이런 문제는 computerized part만 보면 보이지 않음
-
-system 전체에서 사람과 institution이 어떻게 반응하는지 함께 봐야 함
-
-data analysis system이 기존 불평등을 줄이는지, 아니면 확대하는지 검토해야 함
-
-<br>
-
-### Privacy and Tracking
-
-사용자가 명시적으로 입력한 data를 저장해 service를 제공하는 것과, 사용자의 행동을 부수적으로 추적하는 것은 관계가 다름
-
-광고 기반 service에서는 advertiser가 실제 customer가 되고 user의 interest는 뒤로 밀릴 수 있음
-
-tracking data가 오래 보관되고 결합될수록 상세한 profile이 만들어짐
-
-책은 이런 관계를 surveillance라는 관점에서 보라고 제안함
-
-모든 data collection이 surveillance는 아니지만, 이 단어를 사용하면 권력 관계와 사용자 통제권 문제를 더 분명히 볼 수 있음
-
-<br>
-
-### Consent and Freedom of Choice
-
-user가 terms of service에 동의했다고 해서 meaningful consent가 항상 성립하는 것은 아님
-
-대부분의 user는 어떤 data가 수집되고, 얼마나 오래 보관되며, 어떤 derived dataset으로 결합되는지 이해하기 어려움
-
-privacy policy는 설명보다 은폐에 가까울 때도 많음
-
-또한 인기 service가 사회 참여의 사실상 필수 조건이 되면 opt out은 현실적인 선택이 아닐 수 있음
-
-따라서 surveillance를 피할 자유가 실제로 존재하는지 따져봐야 함
-
-<br>
-
-### Privacy and Use of Data
-
-privacy는 모든 것을 숨기는 것이 아님
-
-privacy는 어떤 정보를 누구에게 공개할지 스스로 결정할 수 있는 권리임
-
-data collector가 사용자 data를 가져가면 그 결정권이 개인에서 조직으로 이동할 수 있음
-
-회사는 사용자의 intimate information을 직접 공개하지 않더라도, ad targeting이나 scoring을 통해 간접적으로 사용할 수 있음
-
-이때 사용자는 자신의 정보가 어떻게 드러나는지 통제하기 어려워짐
-
-privacy는 secrecy가 아니라 agency와 autonomy의 문제임
-
-<br>
-
-### Data as Assets and Power
-
-data는 asset처럼 취급되지만, 그 data는 사람에게서 나온 것임
-
-data를 많이 가진 조직은 개인과 사회에 큰 power를 갖게 됨
-
-data breach나 misuse가 발생하면 피해는 data subject에게 돌아갈 수 있음
-
-따라서 data를 무조건 오래 보관하는 태도는 위험함
-
-필요하지 않은 data는 보관하지 않고, 필요가 끝나면 삭제하는 것이 중요함
-
-immutability와 auditability가 중요하더라도, privacy와 deletion 요구를 함께 설계해야 함
-
-<br>
-
-### Legislation and Self-Regulation
-
-regulation은 innovation을 방해할 수 있지만, data misuse와 privacy harm을 줄이는 데 필요할 수 있음
-
-특히 medical data처럼 공익과 privacy risk가 함께 큰 영역에서는 균형이 어려움
-
-책은 법적 규제만이 아니라 tech industry 내부의 culture shift도 필요하다고 봄
-
-user를 최적화할 metric으로만 보지 말고, dignity와 agency를 가진 사람으로 봐야 함
-
-data collection과 processing practice를 스스로 절제하고 투명하게 설명해야 함
-
-<br>
-
-### Summary
-
-복잡한 application은 하나의 database만으로 모든 요구사항을 만족하기 어려움
-
-system of record에서 event stream과 batch processing을 통해 여러 derived data를 만드는 방식이 data integration의 핵심이 될 수 있음
-
-batch와 stream을 통합하면 historical reprocessing과 low-latency update를 같은 logic으로 다룰 수 있음
-
-database 기능을 unbundle하고 dataflow로 조합하면 specialized tool을 더 유연하게 사용할 수 있음
-
-correctness는 lower layer의 transaction만으로 완성되지 않으며, end-to-end operation identifier, idempotence, constraint validation, auditability가 필요함
-
-timeliness보다 integrity를 우선해야 하는 경우가 많고, coordination은 꼭 필요한 부분에만 사용해야 함
-
-마지막으로 data system은 사람에게 영향을 주는 사회적 system이므로 privacy, accountability, bias, surveillance를 설계의 일부로 다뤄야 함
+#### Summary — 정리
+
+- 기준 원본과 파생 경로가 명확하면 재계산·변경·감사가 쉬워짐
+- 비동기 처리는 최신성의 즉시 보장과 데이터 무결성을 분리해 설계하게 함
+- 작업 ID와 대조·복구는 전체 경로의 정확성에 필요함
+- 시스템의 신뢰성·확장성·유지보수성과 함께 데이터 사용의 결과도 검토해야 함
